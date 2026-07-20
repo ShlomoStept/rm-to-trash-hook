@@ -8,6 +8,15 @@ updates:
     groups:
       rust-dependencies:
         patterns: ["*"]
+    ignore:
+      - dependency-name: tree-sitter
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+      - dependency-name: tree-sitter-bash
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
 
   - package-ecosystem: github-actions
     directory: /

@@ -1,163 +1,157 @@
 # rm-to-trash
 
-`rm-to-trash` is a small macOS hook that changes direct `rm` commands issued by
-Claude Code or Codex into `/usr/bin/trash` commands before the shell runs them.
-Files remain recoverable in macOS Trash instead of being permanently deleted.
+[![CI](https://github.com/ShlomoStept/rm-to-trash-hook/actions/workflows/ci.yml/badge.svg)](https://github.com/ShlomoStept/rm-to-trash-hook/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-The same compiled program works with both clients because they use the same
-`PreToolUse` input and `updatedInput` output shape for supported Bash calls.
+`rm-to-trash` is a small macOS hook for Claude Code and Codex. It rewrites
+recoverable `rm` invocations to `/usr/bin/trash` before the shell executes
+them, so files go to macOS Trash instead of being permanently deleted.
+
+It recognizes direct commands, common wrappers, dispatch through `xargs` and
+`find`, compound commands, command substitutions, and literal nested shell
+scripts. The rewrite is syntax-aware: text such as `echo "rm file"` is not
+treated as a deletion.
+
+> [!IMPORTANT]
+> This is a recovery aid, not a security boundary. Dynamic commands and some
+> specialized tool paths cannot be intercepted safely. Keep backups and normal
+> permission controls enabled.
+
+## What changes
+
+| Proposed command | Command executed |
+| --- | --- |
+| `rm -rf build` | `/usr/bin/trash build` |
+| `sudo rm -rf build` | `/usr/bin/trash build` |
+| `env MODE=clean rm -f output` | `env MODE=clean /usr/bin/trash output` |
+| `printf '%s\n' a b \| xargs rm -f` | `printf '%s\n' a b \| xargs /usr/bin/trash` |
+| `find . -name '*.tmp' -exec rm -f {} +` | `find . -name '*.tmp' -exec /usr/bin/trash {} +` |
+| `sh -c 'rm -rf "$1"' _ build` | `sh -c '/usr/bin/trash "$1"' _ build` |
+| `cd /tmp && rm old` | `cd /tmp && /usr/bin/trash old` |
+| `echo "rm old"` | unchanged |
+
+When `sudo` directly or indirectly wraps a recognized deletion, the hook
+removes `sudo`. This keeps the destination in the current user’s Trash. If the
+file actually requires elevated access, the Trash command fails safely instead
+of falling back to permanent deletion.
+
+See the [rewrite contract](docs/rewrite-contract.md) for the complete supported
+matrix and explicit limits.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    A["Claude Code or Codex proposes a Bash command"] --> B{"Bash matcher"}
-    B -->|"not Bash"| C["Hook is skipped"]
-    B -->|"Bash"| D["rm-to-trash parses the full shell command"]
-    D -->|"no direct rm command"| E["No output; normal permission flow continues"]
-    D -->|"direct rm command found"| F["Replace rm and its flags with /usr/bin/trash"]
+    A["Claude Code or Codex proposes a Bash tool call"] --> B["PreToolUse matcher starts rm-to-trash"]
+    B --> C{"Shell syntax contains a supported rm invocation?"}
+    C -->|"No"| D["Exit silently"]
+    D --> E["Normal client permission flow continues"]
+    C -->|"Yes"| F["Replace rm and its flags with /usr/bin/trash"]
     F --> G["Return allow plus the complete updated tool input"]
-    G --> H["Client runs the rewritten command"]
+    G --> H["Client executes the rewritten command"]
 ```
 
-The client launches the hook for every matching Bash tool call. The program
-then exits silently and quickly unless the parsed command contains a direct
-`rm` invocation.
+The matcher selects the `Bash` tool, not the text inside the command. The hook
+therefore starts for every matching Bash tool call in both clients. A fast
+pre-check makes unrelated calls exit without parsing or output. Running on
+every Bash call is intentional: a command-only filter such as `Bash(rm *)`
+would miss `sudo rm`, `xargs rm`, `find -exec rm`, and nested shell forms.
 
-## Rewrite behavior
-
-| Proposed command | Result |
-| --- | --- |
-| `rm file.txt` | `/usr/bin/trash file.txt` |
-| `/bin/rm -rf build` | `/usr/bin/trash build` |
-| `cd /tmp && rm -f old` | `cd /tmp && /usr/bin/trash old` |
-| `rm one; /usr/bin/rm two` | `/usr/bin/trash one; /usr/bin/trash two` |
-| `echo "rm file.txt"` | unchanged |
-| `sudo rm file.txt` | unchanged |
-| `xargs rm` | unchanged |
-| `find . -exec rm {} \\;` | unchanged |
-| `rm` or `rm -rf` with no path | unchanged |
-
-The parser preserves compound commands and all unrelated tool-input fields.
-It intentionally handles only direct shell command nodes. Wrapped or indirect
-deletion forms are outside the current scope and must be governed separately.
+The hook preserves every unchanged field in the original tool input. When it
+rewrites a command, it returns `permissionDecision: "allow"` with the complete
+`updatedInput`, as required by both clients. When no rewrite applies, it emits
+nothing, so the client’s normal permission flow remains in control.
 
 ## Requirements
 
 - macOS with `/usr/bin/trash`
-- Rust 1.80 or newer when building from source
-- Claude Code or a Codex version with `PreToolUse` command hooks and
-  `updatedInput` support
+- Apple Silicon for the prebuilt binary
+- Rust 1.85 or newer when building from source
+- A Claude Code or Codex release that supports `PreToolUse` command hooks and
+  `updatedInput`
 
-The checked-in binary is an Apple Silicon (`arm64`) macOS build. Build from
-source for another architecture.
+Intel Mac users should build from source.
 
-## Build and verify
+## Install
 
-Path remapping keeps local usernames and Cargo cache locations out of the
-compiled executable.
+Choose the client-specific guide:
+
+- [Claude Code installation](docs/install-claude-code.md)
+- [Codex CLI and app installation](docs/install-codex.md)
+
+Both clients can reference the same executable. Installing the file alone does
+nothing; it runs only after a hook configuration points to it.
+
+## Build from source
 
 ```sh
+git clone https://github.com/ShlomoStept/rm-to-trash-hook.git
+cd rm-to-trash-hook
 RUSTFLAGS="--remap-path-prefix=$HOME=/build" cargo build --locked --release
-RUSTFLAGS="--remap-path-prefix=$HOME=/build" cargo test --locked --release
-RUSTFLAGS="--remap-path-prefix=$HOME=/build" cargo clippy --locked --all-targets --all-features --release -- -D warnings
-cargo fmt --check
 install -m 755 target/release/rm-to-trash ./rm-to-trash
 cargo clean
 ```
 
-The final `cargo clean` removes the large intermediate build directory. Source,
-the lockfile, and the installed binary remain.
+Path remapping keeps local usernames and Cargo cache paths out of the binary.
+`cargo clean` removes the large intermediate `target` directory after the
+standalone executable has been installed.
 
-## Install for Claude Code
+Run the complete local verification before installing a source build:
 
-Use an absolute path to the executable in `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/absolute/path/to/rm-to-trash",
-            "timeout": 10
-          }
-        ]
-      }
-    ]
-  }
-}
+```sh
+cargo fmt --check
+RUSTFLAGS="--remap-path-prefix=$HOME=/build" cargo test --locked --release
+RUSTFLAGS="--remap-path-prefix=$HOME=/build" cargo clippy --locked --all-targets --all-features --release -- -D warnings
+cargo audit
+cargo deny check
 ```
 
-Claude Code's matcher selects the `Bash` tool, not command text. The hook still
-parses the entire command, including pipelines, command substitutions, and
-compound statements, after it is launched.
+## Failure and privacy behavior
 
-Review the active registration with `/hooks` in Claude Code. See the official
-[Claude Code hooks reference](https://code.claude.com/docs/en/hooks) for hook
-locations, precedence, and output rules.
-
-## Install for Codex
-
-Add the handler without removing any existing events in `~/.codex/hooks.json`:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "^Bash$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/absolute/path/to/rm-to-trash",
-            "timeout": 10,
-            "statusMessage": "Redirecting rm to macOS Trash"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-`^Bash$` is an exact regular-expression match for Codex's canonical Bash hook
-name. It does not inspect the shell command itself. After installation, open
-`/hooks` in Codex and trust the exact hook definition. Codex stores trust
-against a hash, so changing the registration requires review again.
-
-Codex currently documents incomplete interception of shell execution paths.
-This hook is a recovery aid for supported Bash calls, not a complete security
-or policy boundary. See the official [Codex hooks guide](https://developers.openai.com/codex/hooks)
-for current coverage and trust behavior.
-
-## Failure behavior
-
-- Invalid hook JSON exits with status 2 and an actionable error on stderr.
-- If `/usr/bin/trash` is unavailable, a matching deletion exits with status 2
-  instead of silently running the original permanent deletion.
-- Unrelated events, tools, and Bash commands produce no stdout.
+- Invalid hook JSON exits with status 2 and an actionable error.
+- If `/usr/bin/trash` is unavailable, a recognized deletion exits with status 2
+  instead of silently running the original `rm`.
+- Unsupported or ambiguous commands are left unchanged. The client’s ordinary
+  permissions still apply.
 - The program does not write logs, read transcripts, make network requests, or
-  persist command and prompt contents.
+  persist command or prompt contents.
+- No build directory, logs, transcripts, prompts, local configuration, or
+  machine-specific paths are included in the repository or release artifact.
 
 ## Project layout
 
 ```text
-rm-to-trash/
-├── Cargo.toml       # package metadata, pinned dependencies, release profile
-├── Cargo.lock       # reproducible dependency resolution
-├── src/main.rs      # hook protocol, Bash parsing, rewrite logic, and tests
-├── rm-to-trash      # stripped macOS arm64 release binary
-└── README.md        # behavior, installation, operation, and limitations
+.
+├── .github/
+│   ├── dependabot.yml
+│   └── workflows/ci.yml
+├── docs/
+│   ├── install-claude-code.md
+│   ├── install-codex.md
+│   └── rewrite-contract.md
+├── src/
+│   ├── main.rs
+│   └── rewrite.rs
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+├── Cargo.lock
+├── Cargo.toml
+├── deny.toml
+├── LICENSE
+├── README.md
+├── SECURITY.md
+└── rm-to-trash
 ```
 
-## Uninstall or roll back
+The checked-in `rm-to-trash` file is the stripped Apple Silicon release
+binary. The Rust sources remain the authority for behavior.
 
-Remove only this handler from the relevant `PreToolUse` array, preserving other
-hook events and handlers. Restart the client if it does not reload the settings
-automatically. The executable can remain on disk without running when no hook
-configuration references it.
+## Contributing and security
 
+Behavior changes need representative positive and negative tests because a
+false match can alter a shell command. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Please report vulnerabilities privately as described in
+[SECURITY.md](SECURITY.md).
+
+Released under the [MIT License](LICENSE).

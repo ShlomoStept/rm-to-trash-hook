@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -42,11 +43,15 @@ jobs:
       - name: Check out source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Verify the tag matches the package version
+      - name: Verify the release source
         shell: bash
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-          test "${GITHUB_REF_NAME}" = "v${version}"
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            test "${GITHUB_REF_NAME}" = "v${version}"
+          else
+            printf 'Rehearsing release v%s from %s\n' "$version" "${GITHUB_SHA}"
+          fi
 
       - name: Install the release Rust target
         run: rustup toolchain install 1.85.0 --profile minimal --target ${{ matrix.target }}
@@ -124,6 +129,7 @@ jobs:
 
   publish:
     name: Publish GitHub release
+    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 10

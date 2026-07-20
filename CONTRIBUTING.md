@@ -64,3 +64,8 @@ Do not commit:
 Release binaries are produced only by the tagged release workflow. Every asset
 must be path-remapped, stripped, scanned, checksummed, and smoke-tested on its
 matching native runner.
+
+Before creating a release tag, manually dispatch the Release workflow from the
+intended commit. A manual run builds and verifies all five assets but skips the
+publication job. Create and push `vX.Y.Z` only after that rehearsal passes; the
+tagged run repeats the builds and publishes the checksummed release.

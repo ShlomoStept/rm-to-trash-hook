@@ -108,7 +108,7 @@ jobs:
 
       - name: Install pinned policy tools
         run: |
-          cargo +1.85.0 install cargo-deny --version 0.19.0 --locked
+          cargo +1.85.0 install cargo-deny --version 0.18.3 --locked
           cargo +1.85.0 install cargo-audit --version 0.22.1 --locked
 
       - name: Check dependency licenses and sources

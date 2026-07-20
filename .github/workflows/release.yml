@@ -1,0 +1,158 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            asset: rm-to-trash-macos-arm64
+            executable: rm-to-trash
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            asset: rm-to-trash-macos-x86_64
+            executable: rm-to-trash
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            asset: rm-to-trash-linux-x86_64
+            executable: rm-to-trash
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            asset: rm-to-trash-linux-arm64
+            executable: rm-to-trash
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            asset: rm-to-trash-windows-x86_64.exe
+            executable: rm-to-trash.exe
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Verify the tag matches the package version
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          test "${GITHUB_REF_NAME}" = "v${version}"
+
+      - name: Install the release Rust target
+        run: rustup toolchain install 1.85.0 --profile minimal --target ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+
+      - name: Build the release asset
+        env:
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/build/source
+        run: cargo +1.85.0 build --locked --release --target ${{ matrix.target }}
+
+      - name: Stage the Unix release asset
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${{ matrix.executable }}" "dist/${{ matrix.asset }}"
+          file "dist/${{ matrix.asset }}"
+          if strings "dist/${{ matrix.asset }}" | grep -F "${GITHUB_WORKSPACE}"; then
+            echo "release asset contains its local build path" >&2
+            exit 1
+          fi
+
+      - name: Stage the Windows release asset
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.executable }}" "dist/${{ matrix.asset }}"
+          $bytes = [IO.File]::ReadAllBytes("dist/${{ matrix.asset }}")
+          $ascii = [Text.Encoding]::ASCII.GetString($bytes)
+          $utf16 = [Text.Encoding]::Unicode.GetString($bytes)
+          if ($ascii.Contains($env:GITHUB_WORKSPACE) -or $utf16.Contains($env:GITHUB_WORKSPACE)) {
+            throw "release asset contains its local build path"
+          }
+
+      - name: Ad hoc sign the macOS release asset
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          codesign --force --sign - --timestamp=none "dist/${{ matrix.asset }}"
+          codesign --verify --verbose=2 "dist/${{ matrix.asset }}"
+
+      - name: Smoke-test the native release asset
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          fixture="${RUNNER_TEMP}/rm-to-trash-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          touch "$fixture"
+          "dist/${{ matrix.asset }}" --trash -- "$fixture"
+          test ! -e "$fixture"
+          "dist/${{ matrix.asset }}" --version
+
+      - name: Smoke-test the Windows release asset
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $fixture = Join-Path $env:RUNNER_TEMP "rm-to-trash-release-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          Set-Content -LiteralPath $fixture -Value "fixture"
+          & "dist/${{ matrix.asset }}" --trash -- $fixture
+          if (Test-Path -LiteralPath $fixture) {
+            throw "fixture still exists after Recycle Bin operation"
+          }
+          & "dist/${{ matrix.asset }}" --version
+
+      - name: Upload the release asset
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Download all release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate and verify checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum rm-to-trash-* | sort -k2 > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag \
+            --generate-notes \
+            --title "${GITHUB_REF_NAME}"

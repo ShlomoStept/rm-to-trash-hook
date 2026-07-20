@@ -32,6 +32,13 @@ struct HookSpecificOutput {
 }
 
 fn run(input: HookInput) -> Result<Option<HookOutput>, String> {
+    run_with_trash_availability(input, Path::new(TRASH_PATH).is_file())
+}
+
+fn run_with_trash_availability(
+    input: HookInput,
+    trash_available: bool,
+) -> Result<Option<HookOutput>, String> {
     if input.hook_event_name.as_deref() != Some("PreToolUse")
         || input.tool_name.as_deref() != Some("Bash")
     {
@@ -46,7 +53,7 @@ fn run(input: HookInput) -> Result<Option<HookOutput>, String> {
         return Ok(None);
     };
 
-    if !Path::new(TRASH_PATH).is_file() {
+    if !trash_available {
         return Err(format!(
             "required Trash command is unavailable at {TRASH_PATH}"
         ));
@@ -112,8 +119,12 @@ mod tests {
         }))
         .expect("valid test input");
 
-        let output = serde_json::to_value(run(input).expect("hook succeeds").expect("rewrite"))
-            .expect("serializable output");
+        let output = serde_json::to_value(
+            run_with_trash_availability(input, true)
+                .expect("hook succeeds")
+                .expect("rewrite"),
+        )
+        .expect("serializable output");
         assert_eq!(
             output["hookSpecificOutput"]["updatedInput"],
             json!({
@@ -147,5 +158,21 @@ mod tests {
             let input = serde_json::from_value(value).expect("valid test input");
             assert!(run(input).expect("hook succeeds").is_none());
         }
+    }
+
+    #[test]
+    fn rejects_a_rewrite_when_trash_is_unavailable() {
+        let input: HookInput = serde_json::from_value(json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "rm file"}
+        }))
+        .expect("valid test input");
+
+        let result = run_with_trash_availability(input, false);
+        assert_eq!(
+            result.err().as_deref(),
+            Some("required Trash command is unavailable at /usr/bin/trash")
+        );
     }
 }

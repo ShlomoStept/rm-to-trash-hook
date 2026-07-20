@@ -106,13 +106,14 @@ jobs:
       - name: Install the minimum supported Rust toolchain
         run: rustup toolchain install 1.85.0 --profile minimal
 
-      - name: Install pinned policy tools
-        run: |
-          cargo +1.85.0 install cargo-deny --version 0.18.3 --locked
-          cargo +1.85.0 install cargo-audit --version 0.22.1 --locked
+      - name: Install checksum-verified policy tools
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        with:
+          tool: cargo-deny@0.19.4,cargo-audit@0.22.1
+          fallback: none
 
-      - name: Check dependency licenses and sources
-        run: cargo +1.85.0 deny check
+      - name: Check dependency licenses, sources, and duplicate policy
+        run: cargo +1.85.0 deny check bans licenses sources
 
       - name: Check RustSec advisories
         run: cargo +1.85.0 audit --deny warnings

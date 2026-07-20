@@ -132,12 +132,35 @@ both because they can ship different Codex runtime versions.
 On native Windows, run through Git Bash. WSL uses the Linux build and its Linux
 FreeDesktop Trash.
 
+## Sandbox boundary
+
+`permissionDecision: "allow"` resolves the hook decision, but it does not grant
+filesystem access beyond Codex's shell sandbox. A recoverable deletion must
+write into the operating system Trash or Recycle Bin, which normally lies
+outside the project workspace. Restricted modes such as `workspace-write` can
+therefore deny the rewritten command even when the source path is writable.
+
+This failure is safe: the native Trash process exits nonzero and the original
+`rm` is never restored or retried. Keep the restricted sandbox if that boundary
+is required. Use a broader sandbox only when it is already appropriate for the
+task and account, not merely to make this hook succeed.
+
+Verify the effective behavior after installation:
+
+1. create one disposable file in the same kind of path the client normally
+   edits;
+2. ask Codex to delete it with a direct `rm`;
+3. confirm the executed command contains `rm-to-trash --trash --`; and
+4. confirm the item reaches the native Trash, or that a sandbox denial leaves
+   the source intact and returns a nonzero error.
+
 ## Coverage and limits
 
 Current Codex behavior relevant to this project:
 
 - shell and unified-exec calls use the `Bash` hook name;
 - `PreToolUse` can return `allow` plus complete `updatedInput`;
+- hook approval does not override the shell sandbox;
 - multiple matching command hooks launch concurrently;
 - non-managed and plugin hooks require hash-based trust;
 - hosted tools do not use the local tool-hook path; and

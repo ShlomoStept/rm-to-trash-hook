@@ -5,16 +5,27 @@ can share one `rm-to-trash` executable.
 
 ## 1. Install the executable
 
-Put the Apple Silicon release binary, or a binary built from source, at a stable
-absolute path:
+Download `rm-to-trash-macos-arm64` and `SHA256SUMS` from the latest
+[GitHub release](https://github.com/ShlomoStept/rm-to-trash-hook/releases/latest),
+then verify the download:
+
+```sh
+shasum -a 256 -c SHA256SUMS
+```
+
+Put the verified binary at a stable absolute path:
 
 ```sh
 mkdir -p "$HOME/.codex/hooks/rm-to-trash"
-install -m 755 ./rm-to-trash "$HOME/.codex/hooks/rm-to-trash/rm-to-trash"
+install -m 755 ./rm-to-trash-macos-arm64 "$HOME/.codex/hooks/rm-to-trash/rm-to-trash"
 ```
 
 The binary can instead live under `~/.claude/hooks` when both clients share the
 same installation. Only the configured absolute path matters.
+
+The release binary is ad hoc signed and is not Apple-notarized. If your local
+security policy blocks it, build from the tagged source instead of disabling
+or bypassing that policy.
 
 ## 2. Register the hook
 

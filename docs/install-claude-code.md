@@ -6,12 +6,19 @@ should carry the configuration for all contributors.
 
 ## 1. Install the executable
 
-Download the Apple Silicon release artifact or build from source, then put it
-at a stable absolute path:
+Download `rm-to-trash-macos-arm64` and `SHA256SUMS` from the latest
+[GitHub release](https://github.com/ShlomoStept/rm-to-trash-hook/releases/latest),
+then verify the download:
+
+```sh
+shasum -a 256 -c SHA256SUMS
+```
+
+Put the verified binary at a stable absolute path:
 
 ```sh
 mkdir -p "$HOME/.claude/hooks/rm-to-trash"
-install -m 755 ./rm-to-trash "$HOME/.claude/hooks/rm-to-trash/rm-to-trash"
+install -m 755 ./rm-to-trash-macos-arm64 "$HOME/.claude/hooks/rm-to-trash/rm-to-trash"
 ```
 
 Confirm the platform and executable bit:
@@ -20,6 +27,10 @@ Confirm the platform and executable bit:
 file "$HOME/.claude/hooks/rm-to-trash/rm-to-trash"
 test -x "$HOME/.claude/hooks/rm-to-trash/rm-to-trash"
 ```
+
+The release binary is ad hoc signed and is not Apple-notarized. If your local
+security policy blocks it, build from the tagged source instead of disabling
+or bypassing that policy.
 
 ## 2. Register the hook
 

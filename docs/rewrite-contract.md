@@ -1,6 +1,6 @@
 # Rewrite contract
 
-This document defines what `rm-to-trash` version 1.1 recognizes and what it
+This document defines what `rm-to-trash` version 1.2 recognizes and what it
 deliberately leaves to the client’s normal permission system.
 
 ## Processing model
@@ -14,7 +14,7 @@ flowchart TD
     E --> F["Walk executable command positions"]
     F --> G{"Supported direct, wrapped, or indirect form?"}
     G -->|"No or ambiguous"| D
-    G -->|"Yes"| H["Remove rm flags and substitute /usr/bin/trash"]
+    G -->|"Yes"| H["Remove rm flags and invoke this binary in --trash mode"]
     H --> I["Validate non-overlapping edits"]
     I --> J["Return the complete rewritten tool input"]
 ```
@@ -39,16 +39,15 @@ rm one; rm two
 printf '%s' "$(rm temporary)"
 ```
 
-`rm` flags before the first operand are removed because macOS
-`/usr/bin/trash` has a different option set. Paths, quoting, redirections,
-pipelines, conditionals, and unrelated command segments remain in place.
+`rm` flags before the first operand are removed because native Trash APIs do
+not share `rm`'s option set. Paths, quoting, redirections, pipelines,
+conditionals, and unrelated command segments remain in place.
 
 Direct `rm` with no operand is left unchanged.
 
-When a literal operand after `rm --` begins with `-`, the hook prefixes `./`
-before passing it to `/usr/bin/trash`. Apple’s Trash utility does not support
-`rm`’s `--` option terminator, so this preserves the literal filename without
-turning it into a Trash option.
+The generated native command always contains its own `--` separator. A literal
+operand after `rm --` can therefore continue to begin with `-` without being
+mistaken for an internal option.
 
 ### Execution wrappers
 
@@ -56,7 +55,7 @@ The parser recognizes these wrappers when their option layout is unambiguous:
 
 | Wrapper | Example | Rewrite rule |
 | --- | --- | --- |
-| `command` | `command rm -f file` | Remove `command`; use the absolute Trash path |
+| `command` | `command rm -f file` | Remove `command`; use the native Trash command |
 | `exec` | `exec rm -f file` | Keep `exec`; replace its command |
 | `env` | `env MODE=clean rm -f file` | Keep environment options and assignments |
 | `nice` | `nice -n 5 rm -f file` | Keep scheduling options |
@@ -68,10 +67,10 @@ The parser recognizes these wrappers when their option layout is unambiguous:
 Supported wrappers may be composed where the resulting shell command is valid,
 for example `sudo env MODE=clean rm -rf build`.
 
-`sudo` is intentionally removed rather than retained. Running
-`sudo /usr/bin/trash` could put files in another user’s Trash or make recovery
-unnecessarily difficult. The current user’s Trash command may fail for
-protected files; it never falls back to `rm`.
+`sudo` is intentionally removed rather than retained. Elevated deletion could
+put files in another account's recovery area or make restoration difficult.
+The current user's native Trash operation may fail for protected files; it
+never falls back to `rm`.
 
 Options that change a wrapper into an inspection or non-execution operation
 are not rewritten. Examples include `command -v rm`, `sudo -v`, and
@@ -84,7 +83,7 @@ An explicit `rm` utility supplied to `xargs` is rewritten:
 ```sh
 printf '%s\0' one two | xargs -0 rm -rf
 # becomes
-printf '%s\0' one two | xargs -0 /usr/bin/trash
+printf '%s\0' one two | xargs -0 <rm-to-trash> --trash --
 ```
 
 The parser understands common macOS and GNU `xargs` options, including options
@@ -154,6 +153,22 @@ The following are unchanged:
 Unsupported does not mean approved. The hook emits no decision for these forms,
 so Claude Code or Codex continues through its ordinary permission handling.
 
+## Platform boundary
+
+The Bash rewrite contract is the same on every supported build. The second
+binary invocation selects the native destination:
+
+| Platform | Destination | Command surface |
+| --- | --- | --- |
+| macOS | System Trash | Bash `rm` |
+| FreeDesktop-compatible Linux | FreeDesktop Trash | Bash `rm` |
+| WSL | Trash inside the Linux distribution | Bash `rm` |
+| Native Windows | Windows Recycle Bin | Git Bash `rm` |
+
+Claude Code's PowerShell tool uses `Remove-Item`, aliases, and PowerShell syntax.
+It does not match this project's `Bash` handler and is not parsed by the Bash
+grammar.
+
 ## Parse failure behavior
 
 If the shell parser reports a total syntax failure, a conservative direct
@@ -170,3 +185,7 @@ every deletion API or every client execution path is intercepted. In
 particular, Codex documents that specialized tool paths may opt out of the
 default hook path. Treat the hook as one layer alongside backups, version
 control, filesystem permissions, and client permission rules.
+
+If the hook identifies a supported deletion but cannot resolve its own
+executable or the operating system rejects the Trash operation, the command
+fails. The original `rm` is never executed as a fallback.

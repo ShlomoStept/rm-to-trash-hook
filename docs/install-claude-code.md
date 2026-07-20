@@ -1,41 +1,85 @@
 # Install for Claude Code
 
-This guide installs `rm-to-trash` as a user-level Claude Code hook. The same
-shape can be placed in a project-level `.claude/settings.json` when a repository
-should carry the configuration for all contributors.
+The recommended user-level installation uses the downloaded native binary to
+copy itself and merge one `PreToolUse` handler into
+`~/.claude/settings.json`.
 
-## 1. Install the executable
+## 1. Download and verify
 
-Download `rm-to-trash-macos-arm64` and `SHA256SUMS` from the latest
-[GitHub release](https://github.com/ShlomoStept/rm-to-trash-hook/releases/latest),
-then verify the download:
+Download `SHA256SUMS` and the matching asset from the
+[latest GitHub release](https://github.com/ShlomoStept/rm-to-trash-hook/releases/latest):
 
-```sh
-shasum -a 256 -c SHA256SUMS
-```
+| Host | Asset |
+| --- | --- |
+| Apple silicon macOS | `rm-to-trash-macos-arm64` |
+| Intel macOS | `rm-to-trash-macos-x86_64` |
+| ARM64 Linux | `rm-to-trash-linux-arm64` |
+| x86-64 Linux | `rm-to-trash-linux-x86_64` |
+| x86-64 Windows | `rm-to-trash-windows-x86_64.exe` |
 
-Put the verified binary at a stable absolute path:
-
-```sh
-mkdir -p "$HOME/.claude/hooks/rm-to-trash"
-install -m 755 ./rm-to-trash-macos-arm64 "$HOME/.claude/hooks/rm-to-trash/rm-to-trash"
-```
-
-Confirm the platform and executable bit:
+On macOS:
 
 ```sh
-file "$HOME/.claude/hooks/rm-to-trash/rm-to-trash"
-test -x "$HOME/.claude/hooks/rm-to-trash/rm-to-trash"
+asset=rm-to-trash-macos-arm64 # use macos-x86_64 on Intel
+grep " ${asset}$" SHA256SUMS | shasum -a 256 -c -
+chmod +x "$asset"
 ```
 
-The release binary is ad hoc signed and is not Apple-notarized. If your local
-security policy blocks it, build from the tagged source instead of disabling
-or bypassing that policy.
+On Linux:
 
-## 2. Register the hook
+```sh
+asset=rm-to-trash-linux-x86_64 # use linux-arm64 on ARM64
+grep " ${asset}$" SHA256SUMS | sha256sum -c -
+chmod +x "$asset"
+```
 
-Merge this handler into `~/.claude/settings.json`. Preserve existing events,
-matcher groups, and handlers:
+On Windows PowerShell:
+
+```powershell
+$asset = "rm-to-trash-windows-x86_64.exe"
+$expected = ((Select-String -Path SHA256SUMS -Pattern " $asset$").Line -split "\s+")[0]
+$actual = (Get-FileHash -Algorithm SHA256 $asset).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "SHA-256 mismatch" }
+```
+
+The macOS assets are ad hoc signed and are not Apple-notarized. If local policy
+rejects them, build the tagged source instead of bypassing that policy.
+
+## 2. Preview and install
+
+On macOS or Linux:
+
+```sh
+./"$asset" install --claude --dry-run
+./"$asset" install --claude
+./"$asset" doctor --claude
+```
+
+On Windows PowerShell:
+
+```powershell
+.\rm-to-trash-windows-x86_64.exe install --claude --dry-run
+.\rm-to-trash-windows-x86_64.exe install --claude
+.\rm-to-trash-windows-x86_64.exe doctor --claude
+```
+
+`doctor` checks both clients by default. The `--claude` flag limits this check
+to the selected client.
+
+The installer:
+
+1. copies itself to
+   `~/.local/share/rm-to-trash/bin/rm-to-trash` (`.exe` on Windows);
+2. validates the existing settings as JSON;
+3. creates a timestamped backup next to the settings file;
+4. removes an older `rm-to-trash` handler; and
+5. adds the current handler without replacing unrelated settings.
+
+Repeating the same installation does not add a duplicate.
+
+## 3. Inspect the registered hook
+
+Restart Claude Code and open `/hooks`. The effective handler has this shape:
 
 ```json
 {
@@ -46,9 +90,10 @@ matcher groups, and handlers:
         "hooks": [
           {
             "type": "command",
-            "command": "/absolute/path/to/rm-to-trash",
+            "command": "/absolute/installed/path/rm-to-trash",
+            "args": ["hook"],
             "timeout": 10,
-            "statusMessage": "Redirecting rm to macOS Trash"
+            "statusMessage": "Redirecting rm to the operating system Trash"
           }
         ]
       }
@@ -57,60 +102,77 @@ matcher groups, and handlers:
 }
 ```
 
-Replace the example path with the exact absolute path from your machine.
+The installer merges this object. It does not replace the complete
+`settings.json`.
 
-Do not add an `if: "Bash(rm *)"` filter. Claude Code’s `matcher` selects the
-tool name, while an `if` rule filters subcommands. A direct-only filter can
-prevent the hook from seeing `sudo rm`, `xargs rm`, `find -exec rm`, and nested
-shell forms. With the configuration above, the program starts on every Bash
-tool call and exits quickly and silently when no `rm` token exists.
+Do not add an `if: "Bash(rm *)"` filter. The `Bash` matcher selects the tool
+name. A direct-command filter would prevent the hook from seeing `sudo rm`,
+`xargs rm`, `find -exec rm`, and literal nested shell forms. The binary starts
+for every Bash tool call and performs a cheap token check before parsing.
 
-## 3. Review and test
+## 4. Test with disposable files
 
-Open `/hooks` in Claude Code and confirm that the handler appears under
-`PreToolUse: Bash`.
-
-Use a disposable directory for the first test:
+Ask Claude Code to run these commands, rather than running them in an ordinary
+terminal where the hook is absent:
 
 ```sh
 fixture="$(mktemp -d)"
-touch "$fixture/direct" "$fixture/wrapped"
+touch "$fixture/direct" "$fixture/wrapped" "$fixture/xargs"
 rm "$fixture/direct"
 sudo rm "$fixture/wrapped"
+printf '%s\0' "$fixture/xargs" | xargs -0 rm -f
 ```
 
-Both files should disappear from the fixture and appear in the current user’s
-macOS Trash. The `sudo` wrapper is removed by the hook, so this test should not
-ask for a password.
+On Windows, use Git Bash and omit the `sudo` line. The affected files should
+leave the fixture and appear in the operating system Recycle Bin.
 
-Also run a non-deletion command and confirm it behaves normally:
+Also run an unrelated command:
 
 ```sh
 printf '%s\n' "hook smoke test"
 ```
 
-## How Claude Code evaluates the configuration
+It should behave normally with no hook output.
 
-Claude Code fires `PreToolUse` after it has created the Bash tool input and
-before the command runs. The `Bash` matcher is an exact tool-name match. The
-hook receives the complete tool input as JSON on standard input.
+## Windows boundary
 
-When a rewrite applies, `rm-to-trash` returns `permissionDecision: "allow"` and
-the complete replacement input. Claude Code then executes the rewritten
-command without a separate permission prompt. When no rewrite applies, the
-hook exits with no output, which leaves the normal permission flow unchanged.
+Native Windows `rm` coverage requires Git Bash. Claude Code can also expose a
+separate PowerShell tool whose deletion command is `Remove-Item`. That tool has
+a different syntax and does not match this hook's `Bash` matcher.
 
-See the official [Claude Code hooks reference](https://code.claude.com/docs/en/hooks)
-for configuration precedence, event schemas, and decision behavior.
+WSL uses the Linux asset and FreeDesktop Trash inside the WSL distribution, not
+the Windows Recycle Bin.
+
+## Manual configuration fallback
+
+If policy forbids the installer:
+
+1. copy the verified binary to a stable absolute path;
+2. back up `~/.claude/settings.json`;
+3. merge the handler shown above; and
+4. restart Claude Code and inspect `/hooks`.
+
+Use exec form (`command` plus `args`) so paths containing spaces are passed as
+one executable path on every platform.
 
 ## Uninstall
 
-Remove only the `rm-to-trash` handler object from the relevant `PreToolUse`
-matcher group. Keep any other handlers in the same array.
-
-After verifying that no settings file references the executable, you may remove
-the installed binary:
+Preview and remove only this handler:
 
 ```sh
-/usr/bin/trash "$HOME/.claude/hooks/rm-to-trash/rm-to-trash"
+rm-to-trash uninstall --claude --dry-run
+rm-to-trash uninstall --claude
 ```
+
+The installed binary remains so the same command behaves consistently on
+Windows, where a running executable cannot remove itself. After the command
+exits and no client configuration references it, delete:
+
+```text
+~/.local/share/rm-to-trash/bin/rm-to-trash
+```
+
+Use the `.exe` filename on Windows.
+
+See the official [Claude Code hooks reference](https://code.claude.com/docs/en/hooks)
+for current event, matcher, exec-form, and Windows-shell behavior.

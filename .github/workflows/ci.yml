@@ -15,41 +15,105 @@ concurrency:
 
 jobs:
   verify:
-    name: Rust and release verification
-    runs-on: macos-14
-    timeout-minutes: 20
+    name: Verify on ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            runner: macos-15
+          - name: Linux x86_64
+            runner: ubuntu-24.04
+          - name: Windows x86_64
+            runner: windows-2025
 
     steps:
       - name: Check out source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Install the minimum supported Rust toolchain
-        run: |
-          rustup toolchain install 1.85.0 --profile minimal --component clippy,rustfmt
-          rustup default 1.85.0
+        run: rustup toolchain install 1.85.0 --profile minimal --component clippy,rustfmt
 
       - name: Verify formatting
-        run: cargo fmt --check
+        run: cargo +1.85.0 fmt --check
 
       - name: Run release tests
         env:
-          RUSTFLAGS: --remap-path-prefix=/Users=/build/users
-        run: cargo test --locked --release
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/build/source
+        run: cargo +1.85.0 test --locked --release
 
       - name: Run Clippy
         env:
-          RUSTFLAGS: --remap-path-prefix=/Users=/build/users
-        run: cargo clippy --locked --all-targets --all-features --release -- -D warnings
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/build/source
+        run: cargo +1.85.0 clippy --locked --all-targets --all-features --release -- -D warnings
 
-      - name: Build the release binary
+      - name: Build the native release binary
         env:
-          RUSTFLAGS: --remap-path-prefix=/Users=/build/users
-        run: cargo build --locked --release
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/build/source
+        run: cargo +1.85.0 build --locked --release
 
-      - name: Check binary type and local path hygiene
+      - name: Smoke-test the native Trash backend
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          fixture="${RUNNER_TEMP}/rm-to-trash-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          touch "$fixture"
+          target/release/rm-to-trash --trash -- "$fixture"
+          test ! -e "$fixture"
+
+      - name: Smoke-test the Windows Recycle Bin backend
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $fixture = Join-Path $env:RUNNER_TEMP "rm-to-trash-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          Set-Content -LiteralPath $fixture -Value "fixture"
+          & target/release/rm-to-trash.exe --trash -- $fixture
+          if (Test-Path -LiteralPath $fixture) {
+            throw "fixture still exists after Recycle Bin operation"
+          }
+
+      - name: Check Unix binary type and local path hygiene
+        if: runner.os != 'Windows'
+        shell: bash
         run: |
           file target/release/rm-to-trash
-          if strings target/release/rm-to-trash | grep -E '/Users/|/home/'; then
-            echo "release binary contains a local build path" >&2
+          if strings target/release/rm-to-trash | grep -F "${GITHUB_WORKSPACE}"; then
+            echo "release binary contains its local build path" >&2
             exit 1
           fi
+
+      - name: Check Windows binary path hygiene
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bytes = [IO.File]::ReadAllBytes("target/release/rm-to-trash.exe")
+          $ascii = [Text.Encoding]::ASCII.GetString($bytes)
+          $utf16 = [Text.Encoding]::Unicode.GetString($bytes)
+          if ($ascii.Contains($env:GITHUB_WORKSPACE) -or $utf16.Contains($env:GITHUB_WORKSPACE)) {
+            throw "release binary contains its local build path"
+          }
+
+  dependency-policy:
+    name: Dependency policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install the minimum supported Rust toolchain
+        run: rustup toolchain install 1.85.0 --profile minimal
+
+      - name: Install checksum-verified policy tools
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        with:
+          tool: cargo-deny@0.19.4,cargo-audit@0.22.1
+          fallback: none
+
+      - name: Check dependency licenses, sources, and duplicate policy
+        run: cargo +1.85.0 deny check bans licenses sources
+
+      - name: Check RustSec advisories
+        run: cargo +1.85.0 audit --deny warnings

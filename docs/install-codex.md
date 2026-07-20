@@ -1,36 +1,87 @@
 # Install for Codex CLI and app
 
-Codex CLI and the Codex desktop app use the same user hook configuration and
-can share one `rm-to-trash` executable.
+Codex CLI and the Codex desktop app share the user hook configuration at
+`~/.codex/hooks.json`. The recommended installation uses the native binary to
+copy itself and merge one handler safely.
 
-## 1. Install the executable
+## 1. Download and verify
 
-Download `rm-to-trash-macos-arm64` and `SHA256SUMS` from the latest
-[GitHub release](https://github.com/ShlomoStept/rm-to-trash-hook/releases/latest),
-then verify the download:
+Download `SHA256SUMS` and the matching asset from the
+[latest GitHub release](https://github.com/ShlomoStept/rm-to-trash-hook/releases/latest):
+
+| Host | Asset |
+| --- | --- |
+| Apple silicon macOS | `rm-to-trash-macos-arm64` |
+| Intel macOS | `rm-to-trash-macos-x86_64` |
+| ARM64 Linux | `rm-to-trash-linux-arm64` |
+| x86-64 Linux | `rm-to-trash-linux-x86_64` |
+| x86-64 Windows | `rm-to-trash-windows-x86_64.exe` |
+
+On macOS:
 
 ```sh
-shasum -a 256 -c SHA256SUMS
+asset=rm-to-trash-macos-arm64 # use macos-x86_64 on Intel
+grep " ${asset}$" SHA256SUMS | shasum -a 256 -c -
+chmod +x "$asset"
 ```
 
-Put the verified binary at a stable absolute path:
+On Linux:
 
 ```sh
-mkdir -p "$HOME/.codex/hooks/rm-to-trash"
-install -m 755 ./rm-to-trash-macos-arm64 "$HOME/.codex/hooks/rm-to-trash/rm-to-trash"
+asset=rm-to-trash-linux-x86_64 # use linux-arm64 on ARM64
+grep " ${asset}$" SHA256SUMS | sha256sum -c -
+chmod +x "$asset"
 ```
 
-The binary can instead live under `~/.claude/hooks` when both clients share the
-same installation. Only the configured absolute path matters.
+On Windows PowerShell:
 
-The release binary is ad hoc signed and is not Apple-notarized. If your local
-security policy blocks it, build from the tagged source instead of disabling
-or bypassing that policy.
+```powershell
+$asset = "rm-to-trash-windows-x86_64.exe"
+$expected = ((Select-String -Path SHA256SUMS -Pattern " $asset$").Line -split "\s+")[0]
+$actual = (Get-FileHash -Algorithm SHA256 $asset).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "SHA-256 mismatch" }
+```
 
-## 2. Register the hook
+The macOS assets are ad hoc signed and are not Apple-notarized. Build from the
+tagged source if local policy rejects them.
 
-Merge this handler into `~/.codex/hooks.json`. Preserve every existing event,
-matcher group, and handler:
+## 2. Preview and install
+
+On macOS or Linux:
+
+```sh
+./"$asset" install --codex --dry-run
+./"$asset" install --codex
+./"$asset" doctor --codex
+```
+
+On Windows PowerShell:
+
+```powershell
+.\rm-to-trash-windows-x86_64.exe install --codex --dry-run
+.\rm-to-trash-windows-x86_64.exe install --codex
+.\rm-to-trash-windows-x86_64.exe doctor --codex
+```
+
+`doctor` checks both clients by default. The `--codex` flag limits this check
+to the selected client.
+
+The installer copies itself to the neutral per-user path, validates the
+existing JSON, creates a timestamped backup, replaces an older matching
+handler, and preserves unrelated Codex hooks. Repeating the operation is
+idempotent.
+
+## 3. Review and trust
+
+Restart Codex and open `/hooks`. Codex requires review before any non-managed
+command hook can run. Inspect the source, matcher, and command, then trust the
+exact definition.
+
+Codex records trust against the definition's hash. A path, matcher, handler, or
+plugin update changes that hash, so Codex skips the changed hook until it is
+reviewed again.
+
+The effective handler has this shape on macOS and Linux:
 
 ```json
 {
@@ -41,9 +92,9 @@ matcher group, and handler:
         "hooks": [
           {
             "type": "command",
-            "command": "/absolute/path/to/rm-to-trash",
+            "command": "\"/absolute/installed/path/rm-to-trash\" hook",
             "timeout": 10,
-            "statusMessage": "Redirecting rm to macOS Trash"
+            "statusMessage": "Redirecting rm to the operating system Trash"
           }
         ]
       }
@@ -52,35 +103,19 @@ matcher group, and handler:
 }
 ```
 
-Replace the example path with the exact absolute path on your machine.
+On Windows, the installer also writes Codex's `commandWindows` override.
 
-Codex treats `matcher` as a regular expression over the canonical tool name.
-`^Bash$` therefore matches only Bash tool calls. It does not inspect command
-text. The hook starts for every supported Bash or unified-exec call and exits
-quickly when no `rm` token exists.
+`^Bash$` is a regular expression over the canonical tool name. It matches Bash
+and unified-exec calls presented as `Bash`, not command text. The binary then
+performs its own conservative syntax inspection.
 
-Codex can also load inline hook tables from `~/.codex/config.toml`, but use only
-one representation in the same config layer. The official documentation says
-that defining both `hooks.json` and inline `[hooks]` in one layer causes them to
-be merged with a warning.
+Use either `hooks.json` or inline `[hooks]` tables in a single configuration
+layer. Current Codex documentation says defining both in the same layer merges
+them and produces a warning.
 
-Codex launches multiple matching command hooks concurrently. If another
-`PreToolUse` handler also rewrites Bash input, test the combined configuration
-carefully; neither hook can rely on running after the other.
+## 4. Test CLI and desktop runtime
 
-## 3. Review trust
-
-Open `/hooks` in Codex CLI after adding or changing the handler. Review the
-source, command, and matcher, then trust the exact definition.
-
-Codex records trust against a hash of the hook definition. Editing the command,
-matcher, or other registration fields changes that hash, so Codex skips the
-updated hook until it is reviewed again. Project-local hooks additionally
-require the project’s `.codex` configuration layer to be trusted.
-
-## 4. Test both runtimes
-
-Use a disposable fixture:
+Ask Codex to execute a disposable fixture:
 
 ```sh
 fixture="$(mktemp -d)"
@@ -90,35 +125,54 @@ printf '%s\0' "$fixture/xargs" | xargs -0 rm -f
 find "$fixture" -name find -exec rm -f {} +
 ```
 
-The three files should disappear from the fixture and appear in macOS Trash.
-Run the same representative request once in the CLI and once in the desktop
-app if you use both, because they can ship different Codex runtime versions.
+The files should leave the fixture and appear in the native Trash. Run the
+representative request once in the CLI and once in the desktop app if you use
+both because they can ship different Codex runtime versions.
 
-## Codex coverage and limits
+On native Windows, run through Git Bash. WSL uses the Linux build and its Linux
+FreeDesktop Trash.
 
-Current Codex documentation says:
+## Coverage and limits
 
-- shell commands and unified exec are presented to hooks as `Bash`;
-- `PreToolUse` can return `permissionDecision: "allow"` plus `updatedInput` to
-  rewrite a supported call;
-- non-managed hooks must be reviewed and trusted;
+Current Codex behavior relevant to this project:
+
+- shell and unified-exec calls use the `Bash` hook name;
+- `PreToolUse` can return `allow` plus complete `updatedInput`;
+- multiple matching command hooks launch concurrently;
+- non-managed and plugin hooks require hash-based trust;
 - hosted tools do not use the local tool-hook path; and
-- specialized tool paths may opt out of the default hook path.
+- specialized paths may opt out of the default hook path.
 
-This makes `rm-to-trash` useful for ordinary local shell execution in both the
-CLI and app, but not a complete enforcement boundary.
+This makes the hook a useful recovery guardrail, not a complete enforcement
+boundary.
 
-See the official [Codex hooks documentation](https://developers.openai.com/codex/hooks)
-for current configuration locations, trust behavior, and tool coverage.
+## Manual configuration fallback
+
+If policy forbids the installer:
+
+1. copy the verified native binary to a stable absolute path;
+2. back up `~/.codex/hooks.json`;
+3. merge the handler shown above;
+4. add `commandWindows` for a Windows installation; and
+5. restart Codex, open `/hooks`, and trust the definition.
 
 ## Uninstall
 
-Remove only the `rm-to-trash` handler from the relevant `PreToolUse` matcher
-group and preserve other configured hooks.
-
-After confirming that no Codex or Claude configuration references the binary,
-you may move it to Trash:
+Preview and remove only this handler:
 
 ```sh
-/usr/bin/trash "$HOME/.codex/hooks/rm-to-trash/rm-to-trash"
+rm-to-trash uninstall --codex --dry-run
+rm-to-trash uninstall --codex
 ```
+
+The binary remains at:
+
+```text
+~/.local/share/rm-to-trash/bin/rm-to-trash
+```
+
+Use the `.exe` filename on Windows. Delete it only after the uninstall process
+exits and no Claude Code configuration references the shared binary.
+
+See the official [Codex hooks documentation](https://learn.chatgpt.com/docs/hooks)
+for current configuration, plugin, trust, matcher, and tool-coverage behavior.

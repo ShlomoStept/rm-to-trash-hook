@@ -7,10 +7,11 @@ contract.
 
 Requirements:
 
-- macOS;
 - Rust 1.85 or newer;
-- `/usr/bin/trash`;
 - `cargo-audit` and `cargo-deny` for the complete security check.
+
+Development is supported on macOS, Linux, and Windows. Native end-to-end Trash
+tests use only disposable paths. Windows Bash-rewrite tests require Git Bash.
 
 Create a focused branch, make the smallest change that handles the proposed
 command shape, and add both positive and negative tests.
@@ -29,7 +30,8 @@ cargo deny check
 
 For rewrite changes, also send representative hook JSON to the release binary
 and inspect the complete `updatedInput`. Use only disposable test files for
-end-to-end Trash checks.
+end-to-end Trash checks. Platform changes must pass the matching native GitHub
+runner, not only cross-compilation.
 
 ## Rewrite changes
 
@@ -59,5 +61,6 @@ Do not commit:
 - usernames, home-directory paths, secrets, or credentials; or
 - binaries containing local build paths.
 
-The checked-in release binary is updated only for a release and must be built
-with path remapping, stripped, scanned, and smoke-tested before commit.
+Release binaries are produced only by the tagged release workflow. Every asset
+must be path-remapped, stripped, scanned, checksummed, and smoke-tested on its
+matching native runner.

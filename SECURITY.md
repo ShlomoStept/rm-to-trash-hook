@@ -9,7 +9,7 @@ reporting behavior that may already have been corrected.
 
 Use GitHub’s private vulnerability reporting for this repository. Include:
 
-- the affected version and macOS version;
+- the affected release, operating system, and architecture;
 - the exact command shape, with sensitive paths replaced by placeholders;
 - the observed rewrite or bypass;
 - the expected safe behavior; and
@@ -28,3 +28,7 @@ channel.
 calls. It is not a sandbox, authorization system, malware defense, backup, or
 complete deletion interceptor. Unsupported and ambiguous forms remain subject
 to Claude Code or Codex permission controls.
+
+Native Windows support covers Git Bash `rm`, not PowerShell `Remove-Item`. WSL
+uses the Linux FreeDesktop Trash. On every platform, a native Trash error fails
+the rewritten command and never falls back to the original `rm`.

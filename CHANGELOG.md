@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## [1.2.1] - 2026-07-20
+
+### Documentation
+
+- Clarified that a Codex hook approval does not expand the shell sandbox.
+  Restricted sandbox modes can deny the cross-boundary move into the operating
+  system Trash, in which case the rewritten command fails closed.
+- Added an explicit sandbox verification step and documented the security
+  trade-off without recommending that users weaken their sandbox solely for
+  this hook.
+
 ## [1.2.0] - 2026-07-20
 
 ### Added

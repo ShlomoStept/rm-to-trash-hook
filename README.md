@@ -21,6 +21,11 @@ mistake data such as `echo "rm file"` for an executed deletion.
 > `Remove-Item`, non-shell deletion APIs, hosted tools, and specialized tool
 > paths are outside its interception boundary. Keep backups and normal client
 > permission controls enabled.
+>
+> In Codex, hook approval does not expand the shell sandbox. Moving an item to
+> the operating system Trash crosses the workspace boundary, so restricted
+> sandbox modes can reject the rewritten command. The hook fails closed and
+> never retries with `rm`.
 
 ## Quick install
 
@@ -168,10 +173,17 @@ packaging can be added without weakening platform selection or hook trust.
   `updatedInput`
 - Git Bash for native Windows `rm` interception
 - A FreeDesktop Trash-compatible environment on Linux
+- For Codex, a shell sandbox that permits access to both the source path and
+  the operating system Trash destination
 
 On Linux, the selected Trash library implements the FreeDesktop Trash 1.0
 convention used by common desktop environments. Headless or unusual systems
 that do not follow that convention may reject the operation.
+
+Codex `workspace-write` ordinarily permits writes only in configured workspace
+roots, while the native Trash sits elsewhere. A denied Trash move exits
+nonzero. Keep the restricted sandbox if that protection is more important than
+recoverable deletion; do not enable a broader sandbox solely for this hook.
 
 ## Build and verify from source
 

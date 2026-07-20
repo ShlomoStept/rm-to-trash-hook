@@ -118,6 +118,11 @@ Codex additionally hashes non-managed command-hook definitions. A new install,
 path change, plugin update, or configuration change requires review in
 `/hooks` before Codex runs the changed hook.
 
+Hook approval and shell sandboxing are separate controls. Returning `allow`
+does not grant write access outside Codex's configured sandbox. Because a native
+Trash directory normally sits outside the project workspace, restricted
+sandboxes can reject the move. That error remains fail-closed.
+
 Neither client presents every possible execution path to local hooks. The
 architecture is therefore a recovery guardrail for supported local shell calls,
 not a complete host policy or deletion sandbox.

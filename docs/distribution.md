@@ -53,8 +53,9 @@ are backed up and idempotent, unrelated settings are preserved, and no language
 runtime is required.
 
 Costs/Risks: Users still download one file manually, and Codex still requires
-explicit hook trust. The binary remains after uninstall so behavior is
-consistent on Windows.
+explicit hook trust. The installer does not alter Codex's shell sandbox, and a
+restricted sandbox can deny a move into the operating system Trash. The binary
+remains after uninstall so behavior is consistent on Windows.
 
 Trade-offs: One explicit download in exchange for the smallest reliable
 cross-client installation surface.

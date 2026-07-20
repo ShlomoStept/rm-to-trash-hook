@@ -1,10 +1,10 @@
+use regex::NoExpand;
 use regex::Regex;
 use std::sync::LazyLock;
 use tree_sitter::{Node, Parser, Tree};
 
 const MAX_NESTED_SCRIPT_DEPTH: usize = 8;
 const MAX_WALK_DEPTH: usize = 64;
-pub(crate) const TRASH_PATH: &str = "/usr/bin/trash";
 
 static ANSI_ESCAPE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07|\x1b[^\[\]]")
@@ -21,9 +21,6 @@ static RM_REWRITE_RE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("rm rewrite regex must compile")
 });
 
-static TRASH_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"/usr/bin/trash\b").expect("trash regex must compile"));
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Replacement {
     start: usize,
@@ -32,11 +29,11 @@ struct Replacement {
 }
 
 impl Replacement {
-    fn trash(start: usize, end: usize) -> Self {
+    fn trash(start: usize, end: usize, trash_command: &str) -> Self {
         Self {
             start,
             end,
-            value: TRASH_PATH.to_string(),
+            value: trash_command.to_string(),
         }
     }
 
@@ -55,16 +52,20 @@ struct EffectiveCommand {
     removable_prefix_start: Option<usize>,
 }
 
-pub(crate) fn rewrite_rm_to_trash(command: &str) -> Option<String> {
+pub(crate) fn has_rm_candidate(command: &str) -> bool {
+    HAS_RM_RE.is_match(command)
+}
+
+pub(crate) fn rewrite_rm_to_trash(command: &str, trash_command: &str) -> Option<String> {
     let cleaned = strip_ansi_escapes(command);
-    if !HAS_RM_RE.is_match(&cleaned) {
+    if !has_rm_candidate(&cleaned) {
         return None;
     }
 
-    match rewrite_rm_to_trash_ast(&cleaned, 0) {
+    match rewrite_rm_to_trash_ast(&cleaned, trash_command, 0) {
         Ok(Some(rewritten)) => Some(rewritten),
         Ok(None) => None,
-        Err(()) => rewrite_rm_to_trash_regex(&cleaned),
+        Err(()) => rewrite_rm_to_trash_regex(&cleaned, trash_command),
     }
 }
 
@@ -83,7 +84,11 @@ fn strip_ansi_escapes(value: &str) -> String {
     ANSI_ESCAPE_RE.replace_all(value, "").into_owned()
 }
 
-fn rewrite_rm_to_trash_ast(command: &str, script_depth: usize) -> Result<Option<String>, ()> {
+fn rewrite_rm_to_trash_ast(
+    command: &str,
+    trash_command: &str,
+    script_depth: usize,
+) -> Result<Option<String>, ()> {
     let tree = parse_bash(command).ok_or(())?;
     let root = tree.root_node();
     if is_total_parse_error(root) {
@@ -91,7 +96,14 @@ fn rewrite_rm_to_trash_ast(command: &str, script_depth: usize) -> Result<Option<
     }
 
     let mut replacements = Vec::new();
-    collect_rm_replacements(root, command, &mut replacements, 0, script_depth);
+    collect_rm_replacements(
+        root,
+        command,
+        trash_command,
+        &mut replacements,
+        0,
+        script_depth,
+    );
     apply_replacements(command, replacements)
 }
 
@@ -106,6 +118,7 @@ fn is_total_parse_error(root: Node<'_>) -> bool {
 fn collect_rm_replacements(
     node: Node<'_>,
     source: &str,
+    trash_command: &str,
     replacements: &mut Vec<Replacement>,
     walk_depth: usize,
     script_depth: usize,
@@ -115,12 +128,19 @@ fn collect_rm_replacements(
     }
 
     if node.kind() == "command" {
-        collect_command_replacements(node, source, replacements, script_depth);
+        collect_command_replacements(node, source, trash_command, replacements, script_depth);
     }
 
     for index in 0..node.named_child_count() {
         if let Some(child) = node.named_child(index) {
-            collect_rm_replacements(child, source, replacements, walk_depth + 1, script_depth);
+            collect_rm_replacements(
+                child,
+                source,
+                trash_command,
+                replacements,
+                walk_depth + 1,
+                script_depth,
+            );
         }
     }
 }
@@ -128,6 +148,7 @@ fn collect_rm_replacements(
 fn collect_command_replacements(
     command: Node<'_>,
     source: &str,
+    trash_command: &str,
     replacements: &mut Vec<Replacement>,
     script_depth: usize,
 ) {
@@ -143,9 +164,15 @@ fn collect_command_replacements(
         let start = effective
             .removable_prefix_start
             .unwrap_or_else(|| parts[effective.index].start_byte());
-        if let Some(command_replacements) =
-            rm_replacements(&parts, source, effective.index, parts.len(), start, false)
-        {
+        if let Some(command_replacements) = rm_replacements(
+            &parts,
+            source,
+            trash_command,
+            effective.index,
+            parts.len(),
+            start,
+            false,
+        ) {
             replacements.extend(command_replacements);
         }
         return;
@@ -153,23 +180,39 @@ fn collect_command_replacements(
 
     let before = replacements.len();
     match name {
-        "xargs" => {
-            collect_xargs_replacement(&parts, source, effective.index, replacements, script_depth)
-        }
-        "find" => {
-            collect_find_replacements(&parts, source, effective.index, replacements, script_depth)
-        }
+        "xargs" => collect_xargs_replacement(
+            &parts,
+            source,
+            trash_command,
+            effective.index,
+            replacements,
+            script_depth,
+        ),
+        "find" => collect_find_replacements(
+            &parts,
+            source,
+            trash_command,
+            effective.index,
+            replacements,
+            script_depth,
+        ),
         "sh" | "bash" | "zsh" | "dash" | "ksh" => collect_shell_script_replacement(
             &parts,
             source,
+            trash_command,
             effective.index,
             parts.len(),
             replacements,
             script_depth,
         ),
-        "eval" => {
-            collect_eval_replacement(&parts, source, effective.index, replacements, script_depth)
-        }
+        "eval" => collect_eval_replacement(
+            &parts,
+            source,
+            trash_command,
+            effective.index,
+            replacements,
+            script_depth,
+        ),
         _ => {}
     }
 
@@ -536,6 +579,7 @@ fn is_supported_sudo_flag_group(token: &str) -> bool {
 fn rm_replacements(
     parts: &[Node<'_>],
     source: &str,
+    trash_command: &str,
     rm_index: usize,
     limit: usize,
     replacement_start: usize,
@@ -575,19 +619,11 @@ fn rm_replacements(
         return None;
     }
 
-    let mut replacements = vec![Replacement::trash(replacement_start, end)];
-    if options_finished {
-        for operand in &parts[cursor..limit] {
-            if literal_token_value(*operand, source).is_some_and(|value| value.starts_with('-')) {
-                replacements.push(Replacement {
-                    start: operand.start_byte(),
-                    end: operand.start_byte(),
-                    value: "./".to_string(),
-                });
-            }
-        }
-    }
-    Some(replacements)
+    Some(vec![Replacement::trash(
+        replacement_start,
+        end,
+        trash_command,
+    )])
 }
 
 fn is_rm_operand(node: Node<'_>, source: &str) -> bool {
@@ -624,31 +660,10 @@ fn has_operand_after_redirect(command_name: Node<'_>) -> bool {
         })
 }
 
-fn literal_token_value<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
-    let raw = node_text(node, source)?;
-    match node.kind() {
-        "word" | "number" | "command_name" => Some(raw),
-        "raw_string" if raw.starts_with('\'') && raw.ends_with('\'') && raw.len() >= 2 => {
-            raw.get(1..raw.len() - 1)
-        }
-        "string"
-            if raw.starts_with('"')
-                && raw.ends_with('"')
-                && raw.len() >= 2
-                && node.named_child_count() == 1
-                && node
-                    .named_child(0)
-                    .is_some_and(|child| child.kind() == "string_content") =>
-        {
-            raw.get(1..raw.len() - 1)
-        }
-        _ => None,
-    }
-}
-
 fn collect_xargs_replacement(
     parts: &[Node<'_>],
     source: &str,
+    trash_command: &str,
     xargs_index: usize,
     replacements: &mut Vec<Replacement>,
     script_depth: usize,
@@ -666,9 +681,15 @@ fn collect_xargs_replacement(
             let start = effective
                 .removable_prefix_start
                 .unwrap_or_else(|| parts[effective.index].start_byte());
-            if let Some(command_replacements) =
-                rm_replacements(parts, source, effective.index, parts.len(), start, true)
-            {
+            if let Some(command_replacements) = rm_replacements(
+                parts,
+                source,
+                trash_command,
+                effective.index,
+                parts.len(),
+                start,
+                true,
+            ) {
                 replacements.extend(command_replacements);
             }
         }
@@ -677,6 +698,7 @@ fn collect_xargs_replacement(
             collect_shell_script_replacement(
                 parts,
                 source,
+                trash_command,
                 effective.index,
                 parts.len(),
                 replacements,
@@ -763,6 +785,7 @@ fn has_attached_xargs_option_argument(token: &str) -> bool {
 fn collect_find_replacements(
     parts: &[Node<'_>],
     source: &str,
+    trash_command: &str,
     find_index: usize,
     replacements: &mut Vec<Replacement>,
     script_depth: usize,
@@ -792,9 +815,15 @@ fn collect_find_replacements(
                 let start = effective
                     .removable_prefix_start
                     .unwrap_or_else(|| parts[effective.index].start_byte());
-                if let Some(command_replacements) =
-                    rm_replacements(parts, source, effective.index, terminator, start, false)
-                {
+                if let Some(command_replacements) = rm_replacements(
+                    parts,
+                    source,
+                    trash_command,
+                    effective.index,
+                    terminator,
+                    start,
+                    false,
+                ) {
                     replacements.extend(command_replacements);
                 }
             }
@@ -803,6 +832,7 @@ fn collect_find_replacements(
                 collect_shell_script_replacement(
                     parts,
                     source,
+                    trash_command,
                     effective.index,
                     terminator,
                     replacements,
@@ -827,6 +857,7 @@ fn collect_find_replacements(
 fn collect_shell_script_replacement(
     parts: &[Node<'_>],
     source: &str,
+    trash_command: &str,
     shell_index: usize,
     limit: usize,
     replacements: &mut Vec<Replacement>,
@@ -842,13 +873,14 @@ fn collect_shell_script_replacement(
     let Some((start, end, script)) = single_quoted_content(parts[script_index], source) else {
         return;
     };
-    let Ok(Some(rewritten)) = rewrite_rm_to_trash_ast(script, script_depth + 1) else {
+    let Ok(Some(rewritten)) = rewrite_rm_to_trash_ast(script, trash_command, script_depth + 1)
+    else {
         return;
     };
     replacements.push(Replacement {
         start,
         end,
-        value: rewritten,
+        value: escape_for_single_quoted_layer(&rewritten),
     });
 }
 
@@ -884,6 +916,7 @@ fn is_shell_command_string_option(token: &str) -> bool {
 fn collect_eval_replacement(
     parts: &[Node<'_>],
     source: &str,
+    trash_command: &str,
     eval_index: usize,
     replacements: &mut Vec<Replacement>,
     script_depth: usize,
@@ -894,14 +927,19 @@ fn collect_eval_replacement(
     let Some((start, end, script)) = single_quoted_content(parts[eval_index + 1], source) else {
         return;
     };
-    let Ok(Some(rewritten)) = rewrite_rm_to_trash_ast(script, script_depth + 1) else {
+    let Ok(Some(rewritten)) = rewrite_rm_to_trash_ast(script, trash_command, script_depth + 1)
+    else {
         return;
     };
     replacements.push(Replacement {
         start,
         end,
-        value: rewritten,
+        value: escape_for_single_quoted_layer(&rewritten),
     });
+}
+
+fn escape_for_single_quoted_layer(value: &str) -> String {
+    value.replace('\'', "'\\''")
 }
 
 fn single_quoted_content<'a>(node: Node<'_>, source: &'a str) -> Option<(usize, usize, &'a str)> {
@@ -949,23 +987,25 @@ fn apply_replacements(
         rewritten.replace_range(replacement.start..replacement.end, &replacement.value);
     }
 
-    if rewritten == command || !TRASH_RE.is_match(&rewritten) {
+    if rewritten == command {
         return Ok(None);
     }
     Ok(Some(rewritten))
 }
 
-fn rewrite_rm_to_trash_regex(command: &str) -> Option<String> {
-    let rewritten = RM_REWRITE_RE.replace_all(command, TRASH_PATH).into_owned();
-    (rewritten != command && verify_regex_fallback(&rewritten)).then_some(rewritten)
+fn rewrite_rm_to_trash_regex(command: &str, trash_command: &str) -> Option<String> {
+    let rewritten = RM_REWRITE_RE
+        .replace_all(command, NoExpand(trash_command))
+        .into_owned();
+    (rewritten != command && verify_regex_fallback(&rewritten, trash_command)).then_some(rewritten)
 }
 
-fn verify_regex_fallback(rewritten: &str) -> bool {
+fn verify_regex_fallback(rewritten: &str, trash_command: &str) -> bool {
     let mut found_trash = false;
 
-    for matched in TRASH_RE.find_iter(rewritten) {
+    for (start, _) in rewritten.match_indices(trash_command) {
         found_trash = true;
-        let trimmed = rewritten[matched.end()..].trim_start();
+        let trimmed = rewritten[start + trash_command.len()..].trim_start();
         if trimmed.is_empty()
             || trimmed.starts_with("&&")
             || trimmed.starts_with("||")
@@ -1020,33 +1060,35 @@ fn verify_regex_fallback(rewritten: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    fn rewrite_rm_to_trash(command: &str) -> Option<String> {
+        super::rewrite_rm_to_trash(command, "/trash --trash --")
+    }
 
     #[test]
     fn rewrites_direct_rm_commands() {
         assert_eq!(
             rewrite_rm_to_trash("rm file.txt"),
-            Some("/usr/bin/trash file.txt".to_string())
+            Some("/trash --trash -- file.txt".to_string())
         );
         assert_eq!(
             rewrite_rm_to_trash("rm -rf dir1 \"dir two\""),
-            Some("/usr/bin/trash dir1 \"dir two\"".to_string())
+            Some("/trash --trash -- dir1 \"dir two\"".to_string())
         );
         assert_eq!(
             rewrite_rm_to_trash("/bin/rm -rf foo"),
-            Some("/usr/bin/trash foo".to_string())
+            Some("/trash --trash -- foo".to_string())
         );
         assert_eq!(
             rewrite_rm_to_trash("command rm -f item"),
-            Some("/usr/bin/trash item".to_string())
+            Some("/trash --trash -- item".to_string())
         );
         assert_eq!(
             rewrite_rm_to_trash("rm >out.log file"),
-            Some("/usr/bin/trash >out.log file".to_string())
+            Some("/trash --trash -- >out.log file".to_string())
         );
         assert_eq!(
             rewrite_rm_to_trash("rm -rf -- -leading '-second'"),
-            Some("/usr/bin/trash ./-leading ./'-second'".to_string())
+            Some("/trash --trash -- -leading '-second'".to_string())
         );
     }
 
@@ -1054,30 +1096,30 @@ mod tests {
     fn rewrites_compound_and_nested_direct_commands() {
         assert_eq!(
             rewrite_rm_to_trash("cd /tmp && rm -rf old"),
-            Some("cd /tmp && /usr/bin/trash old".to_string())
+            Some("cd /tmp && /trash --trash -- old".to_string())
         );
         assert_eq!(
             rewrite_rm_to_trash("rm one; /usr/bin/rm -f two"),
-            Some("/usr/bin/trash one; /usr/bin/trash two".to_string())
+            Some("/trash --trash -- one; /trash --trash -- two".to_string())
         );
         assert_eq!(
             rewrite_rm_to_trash("printf '%s' \"$(rm -f nested)\""),
-            Some("printf '%s' \"$(/usr/bin/trash nested)\"".to_string())
+            Some("printf '%s' \"$(/trash --trash -- nested)\"".to_string())
         );
     }
 
     #[test]
     fn rewrites_supported_execution_wrappers() {
         for (proposed, expected) in [
-            ("sudo rm -rf foo", "/usr/bin/trash foo"),
-            ("sudo -n -- /bin/rm -f foo", "/usr/bin/trash foo"),
-            ("sudo -u root rm -rf foo", "/usr/bin/trash foo"),
-            ("env FOO=bar rm -f foo", "env FOO=bar /usr/bin/trash foo"),
-            ("exec rm -rf foo", "exec /usr/bin/trash foo"),
-            ("nice -n 5 rm -rf foo", "nice -n 5 /usr/bin/trash foo"),
-            ("nohup rm -rf foo", "nohup /usr/bin/trash foo"),
-            ("time -p rm -rf foo", "time -p /usr/bin/trash foo"),
-            ("noglob rm -rf foo", "noglob /usr/bin/trash foo"),
+            ("sudo rm -rf foo", "/trash --trash -- foo"),
+            ("sudo -n -- /bin/rm -f foo", "/trash --trash -- foo"),
+            ("sudo -u root rm -rf foo", "/trash --trash -- foo"),
+            ("env FOO=bar rm -f foo", "env FOO=bar /trash --trash -- foo"),
+            ("exec rm -rf foo", "exec /trash --trash -- foo"),
+            ("nice -n 5 rm -rf foo", "nice -n 5 /trash --trash -- foo"),
+            ("nohup rm -rf foo", "nohup /trash --trash -- foo"),
+            ("time -p rm -rf foo", "time -p /trash --trash -- foo"),
+            ("noglob rm -rf foo", "noglob /trash --trash -- foo"),
         ] {
             assert_eq!(
                 rewrite_rm_to_trash(proposed),
@@ -1091,19 +1133,19 @@ mod tests {
     fn rewrites_xargs_dispatch() {
         assert_eq!(
             rewrite_rm_to_trash("printf '%s\\0' one | xargs -0 rm -rf"),
-            Some("printf '%s\\0' one | xargs -0 /usr/bin/trash".to_string())
+            Some("printf '%s\\0' one | xargs -0 /trash --trash --".to_string())
         );
         assert_eq!(
             rewrite_rm_to_trash("xargs -n 2 -- /bin/rm -f fixed"),
-            Some("xargs -n 2 -- /usr/bin/trash fixed".to_string())
+            Some("xargs -n 2 -- /trash --trash -- fixed".to_string())
         );
         assert_eq!(
             rewrite_rm_to_trash("xargs sudo -n rm -rf"),
-            Some("xargs /usr/bin/trash".to_string())
+            Some("xargs /trash --trash --".to_string())
         );
         assert_eq!(
             rewrite_rm_to_trash("xargs sh -c 'rm -f \"$1\"' _"),
-            Some("xargs sh -c '/usr/bin/trash \"$1\"' _".to_string())
+            Some("xargs sh -c '/trash --trash -- \"$1\"' _".to_string())
         );
     }
 
@@ -1111,23 +1153,25 @@ mod tests {
     fn rewrites_find_exec_and_execdir_dispatch() {
         assert_eq!(
             rewrite_rm_to_trash("find . -exec rm -rf {} +"),
-            Some("find . -exec /usr/bin/trash {} +".to_string())
+            Some("find . -exec /trash --trash -- {} +".to_string())
         );
         assert_eq!(
             rewrite_rm_to_trash("find . -execdir /bin/rm -f {} \\;"),
-            Some("find . -execdir /usr/bin/trash {} \\;".to_string())
+            Some("find . -execdir /trash --trash -- {} \\;".to_string())
         );
         assert_eq!(
             rewrite_rm_to_trash("find . -exec rm -f {} \\; -o -exec sudo rm {} +"),
-            Some("find . -exec /usr/bin/trash {} \\; -o -exec /usr/bin/trash {} +".to_string())
+            Some(
+                "find . -exec /trash --trash -- {} \\; -o -exec /trash --trash -- {} +".to_string()
+            )
         );
         assert_eq!(
             rewrite_rm_to_trash("find . -exec sh -c 'rm -f \"$1\"' _ {} \\;"),
-            Some("find . -exec sh -c '/usr/bin/trash \"$1\"' _ {} \\;".to_string())
+            Some("find . -exec sh -c '/trash --trash -- \"$1\"' _ {} \\;".to_string())
         );
         assert_eq!(
             rewrite_rm_to_trash("sudo find . -exec rm -f {} +"),
-            Some("find . -exec /usr/bin/trash {} +".to_string())
+            Some("find . -exec /trash --trash -- {} +".to_string())
         );
     }
 
@@ -1135,19 +1179,30 @@ mod tests {
     fn rewrites_literal_nested_shell_scripts() {
         assert_eq!(
             rewrite_rm_to_trash("sh -c 'rm -rf \"$1\"' _ foo"),
-            Some("sh -c '/usr/bin/trash \"$1\"' _ foo".to_string())
+            Some("sh -c '/trash --trash -- \"$1\"' _ foo".to_string())
         );
         assert_eq!(
             rewrite_rm_to_trash("bash -lc 'cd /tmp && rm -f old'"),
-            Some("bash -lc 'cd /tmp && /usr/bin/trash old'".to_string())
+            Some("bash -lc 'cd /tmp && /trash --trash -- old'".to_string())
         );
         assert_eq!(
             rewrite_rm_to_trash("eval 'rm -rf foo'"),
-            Some("eval '/usr/bin/trash foo'".to_string())
+            Some("eval '/trash --trash -- foo'".to_string())
         );
         assert_eq!(
             rewrite_rm_to_trash("sudo sh -c 'rm -rf foo'"),
-            Some("sh -c '/usr/bin/trash foo'".to_string())
+            Some("sh -c '/trash --trash -- foo'".to_string())
+        );
+    }
+
+    #[test]
+    fn escapes_the_generated_command_inside_single_quoted_scripts() {
+        assert_eq!(
+            super::rewrite_rm_to_trash(
+                "sh -c 'rm -rf foo'",
+                "\"/tmp/it's/rm to trash\" --trash --"
+            ),
+            Some("sh -c '\"/tmp/it'\\''s/rm to trash\" --trash -- foo'".to_string())
         );
     }
 
@@ -1192,7 +1247,7 @@ mod tests {
     fn strips_ansi_sequences_before_rewriting() {
         assert_eq!(
             rewrite_rm_to_trash("\u{1b}[31mrm\u{1b}[0m file.txt"),
-            Some("/usr/bin/trash file.txt".to_string())
+            Some("/trash --trash -- file.txt".to_string())
         );
     }
 }

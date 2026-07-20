@@ -1,19 +1,20 @@
 [package]
 name = "rm-to-trash"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 rust-version = "1.85"
-description = "Rewrite recoverable rm commands to the macOS Trash in Claude Code and Codex hooks"
+description = "Rewrite recoverable rm commands to the system Trash in Claude Code and Codex hooks"
 license = "MIT"
 repository = "https://github.com/ShlomoStept/rm-to-trash-hook"
 readme = "README.md"
-keywords = ["claude-code", "codex", "hooks", "macos", "trash"]
+keywords = ["claude-code", "codex", "hooks", "trash", "cross-platform"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 regex = "=1.13.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
+trash = { version = "=5.2.6", default-features = false, features = ["coinit_apartmentthreaded"] }
 tree-sitter = "=0.25.10"
 tree-sitter-bash = "=0.25.1"
 
